@@ -9,6 +9,7 @@ class State(TypedDict):
     matched_policies: List[str]         # Compliance rules fetched from DB
     risk_analysis: List[Dict[str, Any]] # Auditor's findings
     loop_count: int                     # Infinite loop guardrail
+    error_feedback: str                  # Message passed from Auditor back to Extractor for correction
     requires_human_review: bool         # Gateway flag
     is_audit_passed: bool              # Final audit result 
 

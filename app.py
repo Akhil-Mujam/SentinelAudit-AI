@@ -28,7 +28,7 @@ Section 9.7 (Governing Law): This agreement, and all claims or causes of action 
 """
 
 # 3. SET UP FREE LOCAL VECTOR DATABASE (ChromaDB + Sentence Transformers)
-# We use the free 'all-MiniLM-L6-v2' model which runs entirely on your local machine
+# We use the free 'all-MiniLM-L6-v2' model from Sentence Transformers.
 local_ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
 chroma_client = chromadb.Client()
 collection = chroma_client.create_collection(name="corporate_policies", embedding_function=local_ef)
@@ -51,6 +51,20 @@ def get_llm():
     return llm
 
 def extract_clauses_node(state: State) -> State:
+    """
+    Extracts compliance-related legal clauses from unstructured contract text
+    using Groq LLM with Pydantic-based structured output enforcement.
+
+    This node identifies critical clauses such as liability, termination,
+    confidentiality, payment terms, and governing law, then stores them
+    as validated JSON objects in the shared graph state.
+
+    Input:
+        - contract_text
+
+    Output:
+        - extracted_clauses
+    """
 
     print("--- NODE 1: EXTRACTING CLAUSES ---")
 
@@ -62,33 +76,52 @@ def extract_clauses_node(state: State) -> State:
         Contract Text:
         {contract_text} 
         Please identify and extract the following types of clauses:
-1. Indemnification: Clauses that specify the obligations of one party to compensate the other
-2. Liability Limit: Clauses that set a cap on the amount of damages one party can claim from the other
-3. Termination: Clauses that outline the conditions under which the contract can be terminated
-4. Confidentiality: Clauses that require parties to keep certain information confidential
-5. Payment Terms: Clauses that specify the payment schedule, amounts, and conditions
-6. Governing Law: Clauses that specify which jurisdiction's laws will govern the contract
-7. Dispute Resolution: Clauses that outline how disputes will be resolved, such as arbitration
-8. Force Majeure: Clauses that release parties from obligations in case of extraordinary events
-9. Intellectual Property: Clauses that address ownership and rights related to intellectual property
-10. Non-Compete: Clauses that restrict parties from engaging in competitive activities
-For each identified clause, provide the following information in a structured JSON format:
-- clause_title: The name of the clause (e.g., Indemnification, Liability Limit
-- extracted_text: The exact text snippet from the contract that corresponds to the clause
-- financial_value: Any explicit monetary values found in this clause. Default to 0.0
-Return the extracted clauses as a list of JSON objects under the key "extracted_clauses" in the state.
+        1. Indemnification: Clauses that specify the obligations of one party to compensate the other
+        2. Liability Limit: Clauses that set a cap on the amount of damages one party can claim from the other
+        3. Termination: Clauses that outline the conditions under which the contract can be terminated
+        4. Confidentiality: Clauses that require parties to keep certain information confidential
+        5. Payment Terms: Clauses that specify the payment schedule, amounts, and conditions
+        6. Governing Law: Clauses that specify which jurisdiction's laws will govern the contract
+        7. Dispute Resolution: Clauses that outline how disputes will be resolved, such as arbitration
+        8. Force Majeure: Clauses that release parties from obligations in case of extraordinary events
+        9. Intellectual Property: Clauses that address ownership and rights related to intellectual property
+        10. Non-Compete: Clauses that restrict parties from engaging in competitive activities
+        For each identified clause, provide the following information in a structured JSON format:
+        - clause_title: The name of the clause (e.g., Indemnification, Liability Limit
+        - extracted_text: The exact text snippet from the contract that corresponds to the clause
+        - financial_value: Any explicit monetary values found in this clause. Default to 0.0
+        Return the extracted clauses as a list of JSON objects under the key "extracted_clauses" in the state.
+
+        {error_feedback}
         """
     )
 
-    chain  = prompt | llm.with_structured_output(ClauseExtractionSchema) 
+    try:
+        chain  = prompt | llm.with_structured_output(ClauseExtractionSchema) 
 
-    response = chain.invoke({"contract_text": state['contract_text']})
+        response = chain.invoke({"contract_text": state['contract_text'], "error_feedback": state.get("error_feedback", "")})
 
-    return {"extracted_clauses": [clause.model_dump() for clause in response.clauses]}
-
+        return {"extracted_clauses": [clause.model_dump() for clause in response.clauses], "error_feedback": "" }
+    except Exception as e:
+        print(f"Error during clause extraction: {e}")
+        return {"extracted_clauses": [], "error_feedback": f"Extraction error: {str(e)}"}
 
 
 def policy_router_node(state: State) :
+    """
+    Retrieves semantically relevant company compliance policies for each
+    extracted contract clause using ChromaDB vector similarity search.
+
+    This node converts extracted clauses into embedding search queries,
+    matches them against internally indexed policy documents, and stores
+    the most relevant compliance references in the shared graph state.
+
+    Input:
+        - extracted_clauses
+
+    Output:
+        - matched_policies
+    """
     print("--- NODE 2: RETRIEVING COMPANY POLICIES ---")
     # In a full app, you would query ChromaDB here using state["extracted_clauses"]
     
@@ -108,7 +141,26 @@ def policy_router_node(state: State) :
 
 # NODE 3: The Auditor (Critique) Agent
 def auditor_node(state: State):
+    """
+    Performs semantic compliance auditing by comparing extracted contract
+    clauses against internally retrieved company policies using LLM-based analysis.
+
+    This node evaluates potential policy violations, generates a structured
+    risk summary, and determines whether the workflow requires human review
+    escalation based on detected compliance conflicts.
+
+    Input:
+        - extracted_clauses
+        - matched_policies
+        - loop_count
+
+    Output:
+        - risk_analysis
+        - requires_human_review
+        - loop_count
+    """
     print("--- NODE 3: AUDITING CLAUSES AGAINST POLICIES ---")
+
     clauses = state["extracted_clauses"]
     policies = state["matched_policies"]
     current_loops = state.get("loop_count", 0)
@@ -136,23 +188,28 @@ def auditor_node(state: State):
     
 
 def routing_logic(state: State):
+
     if state["loop_count"] >= 3:
-        print("\n!!! LOOP GUARDRAIL: Max loops reached. Escalating. !!!")
+        print("\n!!! LOOP GUARDRAIL [ CIRCUIT BREAKER Condition] : Max loops reached. Escalating. !!!")
         return "human_gate"
+    
+    if state.get("error_feedback"):
+        print("\n!!! ROUTING EDGE: Error feedback received. Routing to Extractor for correction. !!!")
+        return "ExtractClauses"
+
     if state["requires_human_review"]:
         print("\n!!! ROUTING EDGE: Violation detected. Routing to Human Gate. !!!")
         return "human_gate"
-    return "approve_and_finish"
+
+    return "Approve"
 
 
 def build_graph():
     graph = StateGraph(State)
 
-
     graph.add_node("ExtractClauses", extract_clauses_node)
     graph.add_node("PolicyRouter", policy_router_node)
     graph.add_node("Auditor", auditor_node)
-
 
     graph.add_edge(START, "ExtractClauses")
     graph.add_edge("ExtractClauses", "PolicyRouter")
@@ -160,8 +217,9 @@ def build_graph():
     graph.add_conditional_edges("Auditor",
                     routing_logic,
                     {
+                        "ExtractClauses" : "ExtractClauses",
                         "human_gate": END,
-                        "approve_and_finish": END
+                        "Approve": END
                     })
 
 
@@ -180,4 +238,11 @@ result = app.invoke({
     """
     })
 
-print(result)
+print(f"Contract  Text : {result['contract_text']}")
+print(f"Extracted Clauses : {result['extracted_clauses']}")
+print(f"Matched Policies : {result['matched_policies']}")
+print(f"Risk Analysis : {result['risk_analysis']}")
+print(f"Requires Human Review? : {result['requires_human_review']}")
+print(f"Loop Count : {result['loop_count']}")
+print(f"Error Feedback : {result['error_feedback']}")
+print(f"Final Audit Result (Pass/Fail): {'FAIL' if result['requires_human_review'] else 'PASS'}")
